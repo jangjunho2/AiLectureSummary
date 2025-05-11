@@ -98,7 +98,7 @@ public class LectureService {
         // 동기식 처리로 fastAPI에서 요청을 계속 기다림
         try {
             ResponseEntity<LectureRegisterRequest> response = restTemplate.exchange(
-                    "http://localhost:9090/api/summary",  // FastAPI 엔드포인트
+                    "http://ai:9090/api/summary",  // FastAPI 엔드포인트
                     HttpMethod.POST,
                     requestEntity,
                     LectureRegisterRequest.class // 받은 json 응답을 역직렬화

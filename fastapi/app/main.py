@@ -5,18 +5,19 @@ import tempfile
 import os
 import logging
 import subprocess
-from pydantic import BaseModel
-from datetime import datetime
-from typing import Optional
+from pydantic import BaseModel, Field
 from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
 
-# OpenAI 임포트 (키가 없을 때도 에러 안나게)
+# 환경 변수 로드
+load_dotenv()
+
+# OpenAI 임포트
 try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
 
-# 로거 설정
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -31,15 +32,14 @@ app = FastAPI(
     redoc_url="/api/redoc"
 )
 
-# CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Whisper 모델 초기화
 model = WhisperModel(
     model_size_or_path="base",
     device="cpu",
@@ -50,50 +50,67 @@ KST = timezone(timedelta(hours=9))
 
 class SummaryResponse(BaseModel):
     title: str
-    summary: str
-    originalText: str  # camelCase로 통일
-    duration: str      # 포맷팅된 문자열로 변경
+    aiSummary: str = Field(alias="ai_summary")
+    originalText: str = Field(alias="original_text")
+    duration: str
     filename: str
-    timestamp: str     # 포맷팅된 시간 문자열
+    timestamp: str
 
-# OpenAI 클라이언트 초기화
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key) if (api_key and OpenAI) else None
+    class Config:
+        allow_population_by_field_name = True
+
+api_key = os.getenv("GPT_SECRET_KEY") or os.getenv("OPENAI_API_KEY")
+if api_key and OpenAI:
+    client = OpenAI(api_key=api_key)
+    logger.info("OpenAI 클라이언트 초기화 성공")
+else:
+    client = None
+    logger.warning("OpenAI API 키를 찾을 수 없습니다")
 
 def get_video_duration(path: str) -> float:
     try:
         result = subprocess.run(
-            [
-                "/usr/bin/ffprobe", "-v", "error", "-show_entries",
-                "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path
-            ],
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True
         )
-        logger.info(f"ffprobe 출력: {result.stdout}")
-        return float(result.stdout.strip())
+        duration_str = result.stdout.strip()
+        try:
+            return float(duration_str)
+        except (ValueError, TypeError):
+            logger.error(f"동영상 길이 문자열 변환 실패: '{duration_str}'")
+            return 0.0
     except Exception as e:
-        logger.error(f"ffprobe로 길이 추출 실패: {e}")
+        logger.error(f"동영상 길이 추출 실패: {str(e)}")
         return 0.0
 
 def format_duration(seconds: float) -> str:
-    """초를 분:초 형식으로 변환"""
-    minutes = int(seconds // 60)
-    seconds = int(seconds % 60)
-    return f"{minutes}:{seconds:02d}"
+    try:
+        if seconds is None or not isinstance(seconds, (int, float)) or seconds < 0:
+            logger.warning(f"잘못된 동영상 길이 값: {seconds}, 0으로 처리합니다.")
+            seconds = 0
+        minutes = int(seconds // 60)
+        seconds = int(seconds % 60)
+        return f"{minutes}:{seconds:02d}"
+    except Exception as e:
+        logger.error(f"동영상 길이 포맷 실패: {str(e)}")
+        return "0:00"
 
-@app.post("/upload", response_model=SummaryResponse)
+@app.get("/", include_in_schema=False)
+async def root():
+    return {"status": "active", "model": "whisper-base", "device": "cpu"}
+
+@app.post("/api/summary", response_model=SummaryResponse)
 async def process_video(file: UploadFile = File(...)):
     temp_video_path = None
     temp_audio_path = None
-    
-    try:
-        # 1. 파일 유효성 검사
-        if not file.filename.lower().endswith(('.mp4', '.mov')):
-            raise HTTPException(400, "지원하지 않는 파일 형식")
 
-        # 2. 임시 파일 저장
+    try:
+        if not file.filename.lower().endswith(('.mp4', '.mov')):
+            raise HTTPException(400, "지원하지 않는 파일 형식입니다.")
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
             content = await file.read()
             if len(content) > 500 * 1024 * 1024:
@@ -101,80 +118,117 @@ async def process_video(file: UploadFile = File(...)):
             temp_video.write(content)
             temp_video_path = temp_video.name
 
-        # 3. 음성 추출
-        temp_audio_path = temp_video_path + ".wav"
-        ffmpeg_cmd = [
-            "ffmpeg", "-i", temp_video_path,
-            "-vn", "-acodec", "pcm_s16le",
-            "-ar", "16000", "-ac", "1",
-            "-af", "highpass=f=300,lowpass=f=3000",
-            temp_audio_path
-        ]
-        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+        try:
+            temp_audio_path = temp_video_path + ".wav"
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-i", temp_video_path,
+                "-vn", "-acodec", "pcm_s16le",
+                "-ar", "16000", "-ac", "1",
+                "-af", "highpass=f=300,lowpass=f=3000",
+                temp_audio_path
+            ]
+            result = subprocess.run(
+                ffmpeg_cmd,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"FFmpeg 오류: {result.stderr}")
+        except Exception as e:
+            logger.error(f"오디오 추출 실패: {str(e)}")
+            raise HTTPException(500, "오디오 추출 실패") from e
 
-        # 4. Whisper 음성 인식
-        segments, info = model.transcribe(
-            audio=temp_audio_path,
-            beam_size=5,
-            language="ko",
-            vad_filter=True
-        )
-        original_text = " ".join(segment.text.strip() for segment in segments)
-        
-        # 동영상 길이 처리 - Whisper duration이 0이면 ffprobe로 직접 추출
-        duration_sec = info.duration
-        if not duration_sec or duration_sec < 0.1:
-            # Whisper duration이 0이면 ffmpeg로 추출
+        try:
+            segments, info = model.transcribe(
+                audio=temp_audio_path,
+                beam_size=5,
+                language="ko",
+                vad_filter=True
+            )
+            original_text = " ".join(segment.text.strip() for segment in segments)
+        except Exception as e:
+            logger.error(f"음성 인식 실패: {str(e)}")
+            raise HTTPException(500, "음성 인식 오류") from e
+
+        # 동영상 길이 처리
+        duration_sec = 0.0
+        if hasattr(info, 'duration') and info.duration and info.duration > 0:
+            duration_sec = info.duration
+            logger.info(f"Whisper 추출 동영상 길이: {duration_sec}초")
+        else:
             duration_sec = get_video_duration(temp_video_path)
-            logger.info(f"Whisper duration이 0이라 ffprobe로 추출: {duration_sec}초")
-        
-        duration = format_duration(duration_sec)  # 포맷팅된 시간
+            logger.info(f"ffprobe 추출 동영상 길이: {duration_sec}초")
 
-        # 5. GPT 요약 생성
-        title = "API 키가 필요합니다"
-        summary = "OpenAI API 키를 설정하면 자동으로 요약이 생성됩니다."
-        
+        if duration_sec <= 0 or not isinstance(duration_sec, (int, float)):
+            logger.warning(f"유효하지 않은 동영상 길이: {duration_sec}, 0으로 설정")
+            duration_sec = 0
+
+        duration = format_duration(duration_sec)
+        logger.info(f"최종 포맷된 동영상 길이: {duration}")
+
+        # GPT 요약 프롬프트
+        title = "요약 제목 없음"
+        ai_summary = "OpenAI API 키를 설정해주세요."
+
         if client:
             try:
                 response = client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[{
-                        "role": "system",
-                        "content": "다음 형식으로 한국어 요약 생성:\n제목: [생성된 제목]\n요약: [3줄 요약]"
-                    }, {
-                        "role": "user", 
-                        "content": original_text
-                    }]
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "아래의 원문 텍스트를 참고하여 "
+                                "1줄 분량의 강의 제목(제목:)과 3줄 이내의 핵심 요약(요약:)을 한국어로 작성해 주세요.\n"
+                                "예시 형식:\n제목: [짧은 제목]\n요약: [3줄 이내 핵심 요약]\n"
+                                "절대 새로운 내용을 추가하지 말고, 원문 내용만 요약하세요."
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": original_text[:12000]
+                        }
+                    ],
+                    temperature=0.5
                 )
                 generated_text = response.choices[0].message.content
-                
+
+                # 파싱 로직 (한국어 기준)
                 if "제목:" in generated_text and "요약:" in generated_text:
-                    title = generated_text.split("\n")[0].replace("제목: ", "").strip()
-                    summary = "\n".join(generated_text.split("\n")[1:]).replace("요약: ", "").strip()
-                    
+                    title = generated_text.split("제목:")[1].split("요약:")[0].strip()
+                    ai_summary = generated_text.split("요약:")[1].strip()
+                else:
+                    title = "자동 생성 제목"
+                    ai_summary = generated_text
+
             except Exception as e:
                 logger.error(f"GPT 요약 실패: {str(e)}")
                 title = "요약 생성 오류"
-                summary = f"GPT 처리 중 오류 발생: {str(e)}"
+                ai_summary = f"오류 내용: {str(e)}"
 
         return {
             "title": title,
-            "summary": summary,
-            "originalText": original_text,  # camelCase 필드명
-            "duration": duration,           # 포맷팅된 시간
+            "ai_summary": ai_summary,
+            "original_text": original_text,
+            "duration": duration,
             "filename": file.filename,
-            "timestamp": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")  # 포맷팅된 시간
+            "timestamp": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
         }
 
+    except HTTPException as he:
+        raise he
     except Exception as e:
         logger.error(f"처리 실패: {str(e)}", exc_info=True)
-        raise HTTPException(500, "서버 오류") from e
-        
+        raise HTTPException(500, "서버 내부 오류") from e
+
     finally:
-        # 6. 임시 파일 정리
         for path in [temp_video_path, temp_audio_path]:
             if path and os.path.exists(path):
-                os.unlink(path)
+                try:
+                    os.unlink(path)
+                except Exception as e:
+                    logger.warning(f"임시 파일 삭제 실패: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

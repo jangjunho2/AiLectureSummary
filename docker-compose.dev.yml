@@ -67,3 +67,5 @@ services:
     depends_on:
       - backend
     restart: always
+    env_file:
+      - .env #

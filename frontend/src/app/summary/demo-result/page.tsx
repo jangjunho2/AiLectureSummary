@@ -8,7 +8,7 @@ import Link from "next/link"
 
 interface SummaryData {
   title: string
-  summary: string
+  aiSummary: string
   originalText: string
   duration: string
   filename: string
@@ -19,7 +19,7 @@ export default function DemoSummaryPage() {
   const router = useRouter()
   const [data, setData] = useState<SummaryData>({
     title: "제목 없음",
-    summary: "",
+    aiSummary: "",
     originalText: "",
     duration: "0:00",
     filename: "파일 없음",
@@ -34,20 +34,13 @@ export default function DemoSummaryPage() {
       if (encodedData) {
         try {
           const decodedData = decodeURIComponent(encodedData)
-          console.log("디코딩된 데이터:", decodedData) // 디버깅용
           const result = JSON.parse(decodedData)
-          console.log("파싱된 결과:", result) // 디버깅용
           
           setData({
             title: result.title || "제목 없음",
-            summary: result.summary || "",
-            originalText: result.originalText || "",
-            // 수정된 부분: duration이 문자열인지 숫자인지 확인
-            duration: typeof result.duration === 'string' 
-              ? result.duration // 문자열이면 그대로 사용
-              : result.duration 
-                ? formatDuration(result.duration) // 숫자면 포맷팅
-                : "0:00",
+            aiSummary: result.aiSummary || result.ai_summary || "",
+            originalText: result.originalText || result.original_text || "",
+            duration: result.duration ? formatDuration(result.duration) : "0:00",
             filename: result.filename || "파일 없음",
             timestamp: result.timestamp 
               ? new Date(result.timestamp).toLocaleString('ko-KR', {
@@ -130,10 +123,10 @@ export default function DemoSummaryPage() {
               <CardContent className="p-6">
                 <h2 className="text-xl font-bold mb-4">생성된 요약</h2>
                 <div className="space-y-4">
-                  {data.summary.split('\n').map((line, index) => (
+                  {data.aiSummary.split('\n').map((line, index) => (
                     <p key={index} className="text-gray-700">{line}</p>
                   ))}
-                  {!data.summary && (
+                  {!data.aiSummary && (
                     <p className="text-gray-400">요약 데이터가 없습니다.</p>
                   )}
                 </div>
@@ -145,7 +138,7 @@ export default function DemoSummaryPage() {
             <Card>
               <CardContent className="p-6">
                 <h2 className="text-xl font-bold mb-4">원본 텍스트</h2>
-                <div className="whitespace-pre-wrap bg-gray-50 p-4 rounded">
+                <div className="whitespace-pre-wrap bg-gray-50 p-4 rounded max-h-[500px] overflow-y-auto">
                   {data.originalText || (
                     <span className="text-gray-400">원문 데이터가 없습니다.</span>
                   )}
