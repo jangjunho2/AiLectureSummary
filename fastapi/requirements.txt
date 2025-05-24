@@ -1,7 +1,8 @@
 fastapi>=0.68.0
 uvicorn>=0.15.0
 python-multipart>=0.0.5
-faster-whisper>=0.9.0
-torch>=2.0.0
-python-dotenv>=1.0.0  # 필수
+python-dotenv>=1.0.0
 openai>=1.0.0
+moviepy>=1.0.0
+pillow>=9.0.0
+requests
